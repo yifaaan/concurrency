@@ -1,3 +1,1 @@
-mod matrix;
-
-use matrix::{multiply, Matrix};
+pub mod matrix;

@@ -40,6 +40,12 @@ pub struct Matrix<T: Debug> {
     col: usize,
 }
 
+impl<T: PartialEq + Debug> Matrix<T> {
+    pub fn new(data: Vec<T>, row: usize, col: usize) -> Self {
+        Self { data, row, col }
+    }
+}
+
 impl<T: Debug> Display for Matrix<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for i in 0..self.row {
