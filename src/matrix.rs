@@ -1,7 +1,37 @@
 use std::{
     fmt::{Debug, Display},
     ops::{Add, AddAssign, Mul},
+    sync::mpsc,
 };
+const NUM_THREADS: usize = 4;
+
+pub struct MsgInput<T> {
+    idx: usize,
+    row: Vec<T>,
+    col: Vec<T>,
+}
+
+impl<T> MsgInput<T> {
+    fn new(idx: usize, row: Vec<T>, col: Vec<T>) -> Self {
+        Self { idx, row, col }
+    }
+}
+
+pub struct MsgOutput<T> {
+    idx: usize,
+    value: T,
+}
+
+pub struct Msg<T> {
+    input: MsgInput<T>,
+    sender: oneshot::Sender<MsgOutput<T>>,
+}
+
+impl<T> Msg<T> {
+    fn new(input: MsgInput<T>, sender: oneshot::Sender<MsgOutput<T>>) -> Self {
+        Self { input, sender }
+    }
+}
 
 #[derive(PartialEq, Debug)]
 pub struct Matrix<T: Debug> {
@@ -9,6 +39,7 @@ pub struct Matrix<T: Debug> {
     row: usize,
     col: usize,
 }
+
 impl<T: Debug> Display for Matrix<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for i in 0..self.row {
@@ -25,15 +56,51 @@ impl<T: Debug> Display for Matrix<T> {
         Ok(())
     }
 }
+
+impl<T> Mul for Matrix<T>
+where
+    T: Debug + Copy + Default + Send + 'static + Add<Output = T> + AddAssign + Mul<Output = T>,
+{
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self::Output {
+        multiply(&self, &rhs).expect("Matrix multipy error")
+    }
+}
+
 pub fn multiply<T>(a: &Matrix<T>, b: &Matrix<T>) -> anyhow::Result<Matrix<T>>
 where
-    T: Debug + Copy + Default + Add<Output = T> + AddAssign + Mul<Output = T>,
+    T: Debug + Copy + Default + Send + 'static + Add<Output = T> + AddAssign + Mul<Output = T>,
 {
     if a.col != b.row {
         return Err(anyhow::anyhow!("Matrix multiply error: a.col != b.row"));
     }
 
-    let mut c = vec![T::default(); a.row * b.col];
+    let senders = (0..NUM_THREADS)
+        .map(|_| {
+            // main线程创建channel
+            let (sx, rx) = mpsc::channel::<Msg<T>>();
+            // 生成线程做点积运算
+            std::thread::spawn(move || {
+                // 接收从main线程发来的任务
+                for msg in rx {
+                    let value = dot_product(msg.input.row, msg.input.col)?;
+                    if let Err(e) = msg.sender.send(MsgOutput {
+                        idx: msg.input.idx,
+                        value: value,
+                    }) {
+                        eprintln!("Send error: {:?}", e);
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            });
+            sx
+        })
+        .collect::<Vec<_>>();
+
+    let matrix_len = a.row * b.col;
+    // oneshot channel的接收端
+    let mut receivers = Vec::with_capacity(matrix_len);
+    let mut c = vec![T::default(); matrix_len];
     for i in 0..a.row {
         for j in 0..b.col {
             // c[i * b.col + j] += a.data[i * a.col + k] * b.data[k * b.col + j];
@@ -51,9 +118,24 @@ where
                     .copied()
                     .collect::<Vec<_>>(),
             );
-            c[i * b.col + j] += dot_product(row_elem, col_elem)?;
+
+            // c[i * b.col + j] += dot_product(row_elem, col_elem)?;
+            let (sx, rx) = oneshot::channel();
+            let idx: usize = i * b.col + j;
+            let input = MsgInput::new(idx, row_elem, col_elem);
+            let msg = Msg::new(input, sx);
+            if let Err(e) = senders[idx % NUM_THREADS].send(msg) {
+                eprintln!("Send error: {:?}", e);
+            }
+            receivers.push(rx);
         }
     }
+    // 处理结果
+    for rx in receivers {
+        let output = rx.recv()?;
+        c[output.idx] = output.value;
+    }
+
     Ok(Matrix {
         data: c,
         row: a.row,
@@ -97,6 +179,7 @@ mod tests {
             col: 3,
         };
         assert_eq!(multiply(&a, &b).unwrap(), expected);
+        assert_eq!(a * b, expected);
         println!("{}", expected);
     }
 }
