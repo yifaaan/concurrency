@@ -1,22 +1,23 @@
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct Metrics {
-    data: Arc<Mutex<HashMap<String, i64>>>,
+    data: Arc<RwLock<HashMap<String, i64>>>,
 }
 
 impl Metrics {
     pub fn new() -> Self {
         Self {
-            data: Arc::new(Mutex::new(HashMap::new())),
+            data: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub fn inc(&self, key: impl Into<String>) -> anyhow::Result<()> {
         self.data
-            .lock()
+            .write()
             .map_err(|e| anyhow::anyhow!("Unlock error: {}", e))?
             .entry(key.into())
             .and_modify(|e| *e += 1)
@@ -26,7 +27,7 @@ impl Metrics {
 
     pub fn dec(&self, key: impl Into<String>) -> anyhow::Result<()> {
         self.data
-            .lock()
+            .write()
             .map_err(|e| anyhow::anyhow!("Unlock error: {}", e))?
             .entry(key.into())
             .and_modify(|e| *e -= 1)
@@ -37,8 +38,21 @@ impl Metrics {
     pub fn snapshot(&self) -> anyhow::Result<HashMap<String, i64>> {
         Ok(self
             .data
-            .lock()
+            .write()
             .map_err(|e| anyhow::anyhow!("Unlock error: {}", e))?
             .clone())
+    }
+}
+
+impl Display for Metrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // write!(f, "{")?;
+        let data = self.data.read().map_err(|_| std::fmt::Error {})?;
+
+        for (key, value) in data.iter() {
+            write!(f, "{}: {},", key, value)?;
+        }
+        write!(f, "\n")?;
+        Ok(())
     }
 }
